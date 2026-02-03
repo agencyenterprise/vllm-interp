@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
     prepare_communication_buffer_for_model)
 from vllm.forward_context import (BatchDescriptor, DPMetadata,
                                   set_forward_context)
+from vllm.inputs import InterventionInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -943,7 +944,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
                Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
-               Optional[torch.Tensor], bool]:
+               Optional[torch.Tensor], bool, Optional[InterventionInputs]]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -952,6 +953,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_scheduled_tokens, use_cascade_attn
         ]
         """
+        # print("scheduler_output", scheduler_output)
+        # print("interventions in gpu model runner", scheduler_output.intervention_list)
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -964,8 +967,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        # get the positions for steering
+        steer_positions = [0]
+        # append the positions for steering, which is the number of scheduled tokens for each request,
+        # which represents the number of input ids for each request, including kv cache
+        for i in req_ids:
+            last_steer_position = steer_positions[-1]
+            steer_positions.append(last_steer_position + scheduler_output.num_scheduled_tokens[i])
+        # get the positions for request id
+        steer_positions_dict = {id: (steer_positions[i], steer_positions[i+1]) for i, id in enumerate(req_ids)}
+        # get which request is feature decode
+        is_feature_decode_id_to_index = {id: scheduler_output.is_feature_decode_list[i] for i, id in enumerate(req_ids)}
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
+        # get the list of activations layers to pull for each request
+        get_activations_layer = set()
+        for i in range(len(req_ids)):
+            # append the activations layers to pull for each request
+            if scheduler_output.get_activations_layer_list[i] is not None:
+                get_activations_layer.update(scheduler_output.get_activations_layer_list[i])
+        # get the list of activations layers to pull for each request, will be used to return the activations tensor
+        get_activations_layer_id_to_index = {id: scheduler_output.get_activations_layer_list[i] for i, id in enumerate(req_ids)}
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -1290,7 +1312,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
                 max_num_scheduled_tokens, ubatch_slices,
-                num_tokens_after_padding, use_cascade_attn)
+                num_tokens_after_padding, use_cascade_attn, scheduler_output.intervention_list, 
+                steer_positions, steer_positions_dict, is_feature_decode_id_to_index, get_activations_layer_id_to_index, get_activations_layer)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2276,6 +2299,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         positions: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        interventions: Optional[InterventionInputs] = None,
+        steer_positions: Optional[torch.Tensor] = None,
+        get_activations_layer: Optional[list[int]] = None,
         **model_kwargs: dict[str, Any],
     ) -> Any:
         """Helper method to call the model forward pass.
@@ -2299,6 +2325,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
+            interventions=interventions,
+            steer_positions=steer_positions,
+            get_activations_layer=get_activations_layer,
             **model_kwargs,
         )
 
@@ -2329,7 +2358,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (attn_metadata, logits_indices, spec_decode_metadata,
                  num_scheduled_tokens_np, spec_decode_common_attn_metadata,
                  max_query_len, ubatch_slices, num_tokens_after_padding,
-                 use_cascade_attn) = self._prepare_inputs(scheduler_output)
+                 use_cascade_attn, interventions, steer_positions, steer_positions_dict, 
+                 is_feature_decode_id_to_index, get_activations_layer_id_to_index, get_activations_layer) = self._prepare_inputs(scheduler_output)
 
             (
                 num_scheduled_tokens,
@@ -2385,17 +2415,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                interventions=interventions,
+                steer_positions=steer_positions,
+                get_activations_layer=get_activations_layer,
                 **model_kwargs,
             )
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
+                # this is for the regular vllm setup, which does not return feature tensor
+                if len(model_output) == 2:
                 # True when EAGLE 3 is used.
-                hidden_states, aux_hidden_states = model_output
+                    hidden_states, aux_hidden_states = model_output
+                    # feature tensor is not returned for regular vllm setup
+                    feature_tensor = None
+                    activations_tensor = None
+                # here, feature tensor and activations tensor are returned for feature readouts
+                else:
+                    hidden_states, aux_hidden_states, feature_tensor, activations_tensor = model_output
             else:
-                # Common case.
-                hidden_states = model_output
-                aux_hidden_states = None
+                # Common case. get feature tensor if present
+                if len(model_output) == 3:
+                    hidden_states, feature_tensor, activations_tensor = model_output
+                    aux_hidden_states = None
+                else:
+                    # here, feature tensor and activations tensor are not returned for regular vllm setup
+                    hidden_states = model_output
+                    aux_hidden_states = None
+                    feature_tensor = None
+                    activations_tensor = None
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -2517,6 +2565,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            steer_positions_dict=steer_positions_dict,
+            feature_tensor=feature_tensor,
+            activations_tensor=activations_tensor,
+            is_feature_decode_id_to_index=is_feature_decode_id_to_index,
+            get_activations_layer_id_to_index=get_activations_layer_id_to_index,
         )
 
         if not self.use_async_scheduling:
@@ -3240,13 +3293,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
+                    interventions=[InterventionInputs(intervention=[{
+                        "feature_id": 0,
+                        "value": 0.01,
+                    }])],
+                    steer_positions=[0, num_tokens],
+                    get_activations_layer={0},
                     **model_kwargs,
                 )
-
+            
+            # do backward compatibility with existing models
+            # with aux hidden states
             if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
+                if len(outputs) == 2:
+                    hidden_states, _ = outputs
+                else:
+                    hidden_states, _, _, _ = outputs
+            # else, use 3 or 1 outputs
             else:
-                hidden_states = outputs
+                if len(outputs) == 3:
+                    hidden_states, _, _ = outputs
+                else:
+                    hidden_states = outputs
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)

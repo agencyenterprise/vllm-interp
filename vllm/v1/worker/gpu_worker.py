@@ -446,6 +446,7 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+        # print("output in vllm/v1/worker/gpu_worker line 449", output)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
             return output
 

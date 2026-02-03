@@ -10,6 +10,7 @@ import torch
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
+from vllm.inputs import InterventionInputs
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -38,6 +39,7 @@ class CachedRequestState:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     output_token_ids: list[int]
+    interventions: Optional[InterventionInputs] = None
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None

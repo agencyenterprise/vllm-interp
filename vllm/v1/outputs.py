@@ -128,6 +128,20 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    # [num_reqs, num_features]
+    feature_tensor: Optional[torch.Tensor] = None
+
+    # [num_reqs, num_activations]
+    activations_tensor: Optional[dict[int, torch.Tensor]] = None
+
+    # [num_reqs + 1]
+    steer_positions_dict: Optional[dict[str, tuple[int, int]]] = None
+
+    # list of is_feature_decode for each request
+    is_feature_decode_id_to_index: dict[str, bool] = None
+
+    # list of get_activations_layer for each request
+    get_activations_layer_id_to_index: dict[str, list[int]] = None
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
@@ -158,4 +172,9 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              num_nans_in_logits=None)
+                                              num_nans_in_logits=None,
+                                              feature_tensor=None,
+                                              steer_positions_dict={},
+                                              activations_tensor=None,
+                                              is_feature_decode_id_to_index={},
+                                              get_activations_layer_id_to_index={})

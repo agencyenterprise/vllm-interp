@@ -14,7 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import PromptType, InterventionInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -219,6 +219,9 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        interventions: Optional[InterventionInputs] = None,
+        is_feature_decode: Optional[bool] = None,
+        get_activations_layer: Optional[list[int]] = None,
         priority: int = 0,
     ) -> None:
         # Validate the request_id type.
@@ -227,15 +230,16 @@ class LLMEngine:
                 f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
+        # interventions here are extra inputs for steering and feature readouts
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, priority)
+            tokenization_kwargs, trace_headers, priority, interventions, is_feature_decode, get_activations_layer)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
         if n == 1:
             # Make a new RequestState and queue.
-            self.output_processor.add_request(request, prompt_str, None, 0)
+            self.output_processor.add_request(request, prompt_str, None, 0, interventions=interventions, is_feature_decode=is_feature_decode, get_activations_layer=get_activations_layer)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
             return
@@ -250,7 +254,7 @@ class LLMEngine:
 
             # Make a new RequestState and queue.
             self.output_processor.add_request(child_request, prompt_str,
-                                              parent_req, idx)
+                                              parent_req, idx, interventions=interventions, is_feature_decode=is_feature_decode, get_activations_layer=get_activations_layer)
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 

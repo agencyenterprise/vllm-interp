@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast, List
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
@@ -195,6 +195,24 @@ both decoder-only and encoder/decoder input types:
   ([`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt])
 """
 
+class InterventionInput(TypedDict):
+    """Represents intervention inputs."""
+
+    feature_id: int
+    """The feature ID to be intervened on."""
+
+    value: float
+    """The value for the intervention (added or clamped depending on mode)."""
+
+    mode: NotRequired[Literal["add", "clamp"]]
+    """The intervention mode: 'add' (default) adds the value, 'clamp' sets the feature to the value."""
+
+
+class InterventionInputs(TypedDict):
+    """Represents intervention inputs."""
+
+    intervention: List[InterventionInput]
+    """The intervention input, which is a list of intervention inputs for multiple features."""
 
 class TokenInputs(TypedDict):
     """Represents token-based inputs."""

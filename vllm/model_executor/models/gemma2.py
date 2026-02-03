@@ -23,11 +23,14 @@ from typing import Optional, Union
 import torch
 from torch import nn
 from transformers import Gemma2Config
+from sae_lens import SAE
+# this is added for input signature
+from vllm.inputs import InterventionInputs
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -37,6 +40,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.models.gemma_sae import load_sae
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -50,6 +54,27 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
                     maybe_prefix)
 
 logger = init_logger(__name__)
+
+# init the sae for each rank for multi-gpu setup
+def init_sae_for_rank(sae_release: str, sae_id: str) -> dict[int, SAE]:
+    # get the local rank of the tp group for multi-gpu setup
+    tp_rank = get_tp_group().local_rank
+    # cached_saes is a dictionary to store the sae for each rank
+    cached_saes: dict[int, SAE] = {}
+    # if the sae for the current rank is not in the cached_saes, load the sae
+    if tp_rank not in cached_saes:
+        # get the device for the current rank
+        device = f"cuda:{tp_rank}"  # Use the GPU corresponding to TP rank
+        device = torch.device(device)
+        cached_saes[tp_rank]: SAE = load_sae(sae_release, sae_id, device)
+        new_dict: dict[str, torch.Tensor] = {}
+        # load the state dict of the sae for the current rank
+        for key, item in cached_saes[tp_rank].state_dict().items():
+            new_dict[key.replace("module._orig_mod.", "")] = item
+        cached_saes[tp_rank].load_state_dict(new_dict)
+        print("cached_saes", cached_saes)
+
+    return cached_saes
 
 
 class Gemma2MLP(nn.Module):
@@ -179,8 +204,14 @@ class Gemma2DecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        cached_saes: Optional[dict[int, SAE]] = None,
     ) -> None:
         super().__init__()
+        # get the cached_saes from the vllm_config
+        self.cached_saes = cached_saes
+        # get the local rank of the tp group for multi-gpu setup
+        self.tp_rank = get_tp_group().local_rank
+
         self.hidden_size = config.hidden_size
         self.self_attn = Gemma2Attention(
             config=config,
@@ -217,6 +248,10 @@ class Gemma2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        intervention_enabled: bool,
+        intervention_list: Optional[list[InterventionInputs]],
+        steer_positions: Optional[list[int]],
+        feature_enabled: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -234,7 +269,50 @@ class Gemma2DecoderLayer(nn.Module):
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        return hidden_states, residual
+        # run intervention if enabled in the layer and if the sae is initialized
+        if intervention_enabled and self.cached_saes is not None:
+            hidden_states, add_tensor = self.forward_sae(hidden_states, intervention_list, steer_positions)
+        else:
+            add_tensor = None
+        # get the feature readout if enabled in the layer and if the sae is initialized
+        if feature_enabled and self.cached_saes is not None:
+            feature_tensor = self.cached_saes[self.tp_rank].encode(hidden_states)
+        else:
+            feature_tensor = None
+        return hidden_states, residual, add_tensor, feature_tensor
+    
+    def forward_sae(self, hidden_states: torch.Tensor, intervention_list: list[InterventionInputs], steer_positions: list[int]) -> torch.Tensor:
+        # get the sae for the current rank
+        sae = self.cached_saes[self.tp_rank]
+        # get the feature encoding
+        features = sae.encode(hidden_states)
+        # Initialize the add tensor for the intervention
+        add_tensor = torch.zeros_like(
+            features, dtype=torch.bfloat16, device=features.device)
+        # get the reconstructed acts
+        reconstructed_acts = sae.decode(features)
+        # get the error between the hidden states and the reconstructed acts
+        error = hidden_states - reconstructed_acts
+        # print("intervention_list", intervention_list)
+        for i, (intervention) in enumerate(intervention_list):
+            # if the intervention is not enabled, skip
+            if not intervention:
+                continue
+            # get the position range for the intervention, vllm has no batch dimension, so we need to get the position range for the intervention
+            pos_beg, pos_end = steer_positions[i], steer_positions[i+1]
+            # print("pos_beg", pos_beg, "pos_end", pos_end)
+            for steer in intervention["intervention"]:
+                # check the intervention mode (default to "add" for backwards compatibility)
+                mode = steer.get("mode", "add")
+                if mode == "clamp":
+                    # clamp the feature to the specified value
+                    features[pos_beg:pos_end, steer["feature_id"]] = steer["value"]
+                else:  # mode == "add"
+                    # add the value to the add tensor
+                    add_tensor[pos_beg:pos_end, steer["feature_id"]] += steer["value"]
+        features += add_tensor
+
+        return sae.decode(features) + error, sae.decode(add_tensor)
 
 
 @support_torch_compile
@@ -248,6 +326,24 @@ class Gemma2Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
+        self.sae_release = vllm_config.model_config.sae_release
+        self.sae_id = vllm_config.model_config.sae_id
+        self.steering_layer = vllm_config.model_config.steering_layer
+        self.feature_layer = vllm_config.model_config.feature_layer
+        if self.sae_release is not None and self.sae_id is not None:
+            self.cached_saes = init_sae_for_rank(self.sae_release, self.sae_id)
+        else:
+            self.cached_saes = None
+
+        # this is the scale factor to subtract the steered tensor from the hidden states
+        self.scale_factor_add_tensor = vllm_config.model_config.steering_scale_factor
+        # this is the add tensor for the intervention
+        self.add_tensor = None
+        # this is the feature tensor for the feature readout
+        self.feature_tensor = None
+        # this is the activations tensor for pulling activations from the model
+        self.activations_tensor = None
+
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -255,7 +351,7 @@ class Gemma2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma2DecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
+                config, cache_config, quant_config, prefix=prefix, cached_saes=self.cached_saes),
             prefix=f"{prefix}.layers")
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -280,6 +376,9 @@ class Gemma2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        interventions: Optional[list[InterventionInputs]] = None,
+        steer_positions: Optional[list[int]] = None,
+        get_activations_layer: Optional[set[int]] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -292,19 +391,42 @@ class Gemma2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(
+        # set activations tensor to empty dictionary
+        self.activations_tensor = {}
+        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+            if idx == self.steering_layer:
+                intervention_enabled = True
+            else:
+                intervention_enabled = False
+            if idx == self.feature_layer:
+                feature_enabled = True
+            else:
+                feature_enabled = False
+            hidden_states, residual, add_tensor, feature_tensor = layer(
                 positions,
                 hidden_states,
                 residual,
+                intervention_enabled=intervention_enabled,
+                intervention_list=interventions,
+                steer_positions=steer_positions,
+                feature_enabled=feature_enabled,
             )
+            if add_tensor is not None:
+                self.add_tensor = add_tensor
+            if feature_tensor is not None:
+                self.feature_tensor = feature_tensor
+            if idx in get_activations_layer:
+                self.activations_tensor[idx] = hidden_states.detach().cpu()
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+        # subtract the add tensor from the hidden states before running final norm
+        if self.add_tensor is not None:
+            hidden_states -= self.add_tensor * self.scale_factor_add_tensor
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return hidden_states, self.feature_tensor, self.activations_tensor
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -400,10 +522,15 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        # need to add the following for compatibility with regular vllm setup
+        interventions: Optional[list[InterventionInputs]] = None,
+        steer_positions: Optional[list[int]] = None,
+        # get_activations_layer is extra input for pulling activations from the model
+        get_activations_layer: Optional[set[int]] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
+        hidden_states, feature_tensor, activations_tensor = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds, interventions, steer_positions, get_activations_layer)
+        return hidden_states, feature_tensor, activations_tensor
 
     def compute_logits(
         self,

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import torch
 
+from vllm.inputs import InterventionInputs
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -33,6 +34,9 @@ class Request:
         pooling_params: Optional[PoolingParams],
         eos_token_id: Optional[int],
         client_index: int = 0,
+        interventions: Optional[InterventionInputs] = None,
+        is_feature_decode: bool = False,
+        get_activations_layer: Optional[list[int]] = None,
         arrival_time: Optional[float] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         mm_features: Optional[list[MultiModalFeatureSpec]] = None,
@@ -49,6 +53,9 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
+        self.interventions = interventions
+        self.is_feature_decode = is_feature_decode
+        self.get_activations_layer = get_activations_layer
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
@@ -148,6 +155,9 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            interventions=request.interventions,
+            is_feature_decode=request.is_feature_decode,
+            get_activations_layer=request.get_activations_layer,
         )
 
     def append_output_token_ids(

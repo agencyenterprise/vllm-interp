@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
+from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs, InterventionInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -334,6 +334,9 @@ class Processor:
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        interventions: Optional[InterventionInputs] = None,
+        is_feature_decode: bool = False,
+        get_activations_layer: Optional[list[int]] = None,
     ) -> tuple[Optional[str], EngineCoreRequest]:
 
         # TODO(woosuk): Support pooling models.
@@ -456,6 +459,9 @@ class Processor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
+            interventions=interventions,
+            is_feature_decode=is_feature_decode,
+            get_activations_layer=get_activations_layer,
         )
 
     def _validate_model_inputs(self, encoder_inputs: Optional[SingletonInputs],

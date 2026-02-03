@@ -113,6 +113,8 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[list[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        feature_tensor: Optional[torch.Tensor] = None,
+        activations_output: Optional[dict[int, torch.Tensor]] = None,
         *,
         multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
         kv_transfer_params: Optional[dict[str, Any]] = None,
@@ -136,6 +138,8 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.feature_tensor = feature_tensor
+        self.activations_output = activations_output
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
@@ -180,7 +184,9 @@ class RequestOutput:
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request}, "
                 f"num_cached_tokens={self.num_cached_tokens}, "
-                f"multi_modal_placeholders={self.multi_modal_placeholders})")
+                f"multi_modal_placeholders={self.multi_modal_placeholders}, "
+                f"feature_tensor={self.feature_tensor}, "
+                f"activations_output={self.activations_output})")
 
 
 _O = TypeVar("_O", default=PoolingOutput)
@@ -198,17 +204,23 @@ class PoolingRequestOutput(Generic[_O]):
     """
 
     def __init__(self, request_id: str, outputs: _O,
-                 prompt_token_ids: list[int], finished: bool):
+                 prompt_token_ids: list[int], finished: bool, 
+                 feature_tensor: Optional[torch.Tensor] = None, 
+                 activations_output: Optional[dict[int, torch.Tensor]] = None):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
         self.outputs = outputs
+        self.feature_tensor = feature_tensor
+        self.activations_output = activations_output
 
     def __repr__(self):
         return (f"{type(self).__name__}(request_id={self.request_id!r}, "
                 f"outputs={self.outputs!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
-                f"finished={self.finished})")
+                f"finished={self.finished}, "
+                f"feature_tensor={self.feature_tensor}, "
+                f"activations_output={self.activations_output})")
 
 
 @dataclass

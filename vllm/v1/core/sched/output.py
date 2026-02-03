@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
+    from vllm.inputs import InterventionInputs
     from vllm.v1.request import Request
 
 
@@ -35,7 +36,8 @@ class NewRequestData:
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
     prompt_embeds: Optional[torch.Tensor] = None
-
+    # interventions are extra inputs for steering and feature readouts
+    interventions: Optional[InterventionInputs] = None
     @classmethod
     def from_request(
         cls,
@@ -52,6 +54,8 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            # interventions are extra inputs for steering and feature readouts
+            interventions=request.interventions,
         )
 
     def __repr__(self) -> str:
@@ -65,7 +69,9 @@ class NewRequestData:
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
-                f"prompt_embeds_shape={prompt_embeds_shape}"
+                f"prompt_embeds_shape={prompt_embeds_shape},"
+                # add interventions for printing the request data
+                f"interventions={self.interventions}"
                 ")")
 
     # Version of __repr__ with the prompt data obfuscated
@@ -83,7 +89,9 @@ class NewRequestData:
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
                 f"lora_request={self.lora_request},"
-                f"prompt_embeds_shape={prompt_embeds_shape}"
+                f"prompt_embeds_shape={prompt_embeds_shape},"
+                # add interventions for printing the request data
+                f"interventions={self.interventions}"
                 ")")
 
 
@@ -161,6 +169,12 @@ class SchedulerOutput:
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
+    # list of interventions for each request
+    intervention_list: list[InterventionInputs]
+    # list of is_feature_decode for each request, required for feature readouts to terminate the request without any further generation
+    is_feature_decode_list: list[bool]
+    # list of get_activations_layer for each request
+    get_activations_layer_list: list[list[int]]
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None

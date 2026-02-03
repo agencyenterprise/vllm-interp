@@ -230,6 +230,7 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink, use_sparse) -> str:
+        logger.info_once(f"selected_backend: {selected_backend}")
         if use_mla:
             if not use_v1:
                 raise RuntimeError(
@@ -256,7 +257,11 @@ class CudaPlatformBase(Platform):
                 selected_backend is None and flash_attn_supports_mla())
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
-
+            logger.info_once(f"use_cutlassmla: {use_cutlassmla}")
+            logger.info_once(f"use_flashinfermla: {use_flashinfermla}")
+            logger.info_once(f"use_flashmla: {use_flashmla}")
+            logger.info_once(f"use_flashattn: {use_flashattn}")
+            logger.info_once(f"use_triton: {use_triton}")
             if use_cutlassmla:
                 logger.info_once("Using Cutlass MLA backend on V1 engine.")
                 return ("vllm.v1.attention.backends.mla."
@@ -294,7 +299,11 @@ class CudaPlatformBase(Platform):
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
             TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
             XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
-
+            logger.info_once(f"selected_backend in use_attn_backend_cls use_v1: {selected_backend}")
+            logger.info_once(f"cls.is_device_capability(100): {cls.is_device_capability(100)}")
+            logger.info_once(f"cls.has_device_capability(80): {cls.has_device_capability(80)}")
+            logger.info_once(f'has_sink: {has_sink}')
+            logger.info_once(f"cls.is_device_capability(90): {cls.is_device_capability(90)}")
             use_fp8_kv_cache = (kv_cache_dtype is not None
                                 and kv_cache_dtype.startswith("fp8"))
 

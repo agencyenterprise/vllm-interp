@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union, cast
-
+from vllm.inputs import InterventionInputs
 import torch
 
 from vllm.outputs import (CompletionOutput, PoolingOutput,
@@ -98,6 +98,9 @@ class RequestState:
         top_p: Optional[float] = None,
         n: Optional[int] = None,
         temperature: Optional[float] = None,
+        interventions: Optional[InterventionInputs] = None,
+        is_feature_decode: Optional[bool] = False,
+        get_activations_layer: Optional[list[int]] = None,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -118,6 +121,10 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.interventions = interventions
+        self.is_feature_decode = is_feature_decode
+        self.is_feature_decode = is_feature_decode
+        self.get_activations_layer = get_activations_layer
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
@@ -131,6 +138,9 @@ class RequestState:
         parent_req: Optional[ParentRequest],
         request_index: int,
         queue: Optional[RequestOutputCollector],
+        interventions: Optional[InterventionInputs],
+        is_feature_decode: Optional[bool],
+        get_activations_layer: Optional[list[int]],
         log_stats: bool,
     ) -> "RequestState":
 
@@ -179,6 +189,9 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            interventions=interventions,
+            is_feature_decode=is_feature_decode,
+            get_activations_layer=get_activations_layer,
         )
 
     def make_request_output(
@@ -188,6 +201,8 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
         kv_transfer_params: Optional[dict[str, Any]] = None,
+        feature_tensor: Optional[torch.Tensor] = None,
+        activations_output: Optional[dict[int, torch.Tensor]] = None,
     ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
@@ -201,7 +216,7 @@ class RequestState:
         if pooling_output is not None:
             return self._new_request_output(
                 request_id, [self._new_pooling_output(pooling_output)],
-                finished)
+                finished, feature_tensor, activations_output)
 
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
@@ -215,7 +230,7 @@ class RequestState:
                 return None
 
         return self._new_request_output(request_id, outputs, finished,
-                                        kv_transfer_params)
+                                        kv_transfer_params, feature_tensor, activations_output)
 
     def _new_request_output(
         self,
@@ -223,6 +238,8 @@ class RequestState:
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
         kv_transfer_params: Optional[dict[str, Any]] = None,
+        feature_tensor: Optional[torch.Tensor] = None,
+        activations_output: Optional[dict[int, torch.Tensor]] = None,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
 
         first_output = outputs[0]
@@ -235,6 +252,8 @@ class RequestState:
                 outputs=first_output,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
+                feature_tensor=feature_tensor,
+                activations_output=activations_output,
             )
         assert self.logprobs_processor is not None
         if self.output_kind == RequestOutputKind.DELTA:
@@ -257,6 +276,8 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
+            feature_tensor=feature_tensor,
+            activations_output=activations_output,
         )
 
     def _new_completion_output(
@@ -360,6 +381,9 @@ class OutputProcessor:
         parent_req: Optional[ParentRequest] = None,
         request_index: int = 0,
         queue: Optional[RequestOutputCollector] = None,
+        interventions: Optional[InterventionInputs] = None,
+        is_feature_decode: bool = False,
+        get_activations_layer: Optional[list[int]] = None,
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
@@ -371,6 +395,9 @@ class OutputProcessor:
                                                   parent_req=parent_req,
                                                   request_index=request_index,
                                                   queue=queue,
+                                                  interventions=interventions,
+                                                  is_feature_decode=is_feature_decode,
+                                                  get_activations_layer=get_activations_layer,
                                                   log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
@@ -425,6 +452,9 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
+            # this is added to get feature tensor for feature readouts
+            feature_tensor = engine_core_output.feature_tensor
+            activations_output = engine_core_output.activations_output
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
@@ -446,7 +476,7 @@ class OutputProcessor:
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
-                    kv_transfer_params):
+                    kv_transfer_params, feature_tensor, activations_output):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)

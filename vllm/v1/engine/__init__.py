@@ -8,7 +8,7 @@ from typing import Any, Optional, Union
 
 import msgspec
 import torch
-
+from vllm.inputs import InterventionInputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -18,7 +18,7 @@ from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "feature_decode")
 
 
 class FinishReason(enum.IntEnum):
@@ -35,6 +35,7 @@ class FinishReason(enum.IntEnum):
     STOP = 0
     LENGTH = 1
     ABORT = 2
+    FEATURE_DECODE = 3
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -57,6 +58,9 @@ class EngineCoreRequest(
     cache_salt: Optional[str]
     data_parallel_rank: Optional[int]
     prompt_embeds: Optional[torch.Tensor] = None
+    interventions: Optional[InterventionInputs] = None
+    is_feature_decode: bool = False
+    get_activations_layer: Optional[list[int]] = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -118,6 +122,8 @@ class EngineCoreOutput(
     trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    feature_tensor: Optional[torch.Tensor] = None
+    activations_output: Optional[dict[int, torch.Tensor]] = None
 
     @property
     def finished(self) -> bool:

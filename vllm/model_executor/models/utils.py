@@ -5,12 +5,13 @@ import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional, Protocol, Union, overload
-
+from vllm.model_executor.models.goodfire_sae import SparseAutoEncoder
 import torch
 import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
+
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -527,7 +528,7 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
-def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
+def maybe_offload_to_cpu(module: torch.nn.Module, cached_saes: Optional[dict[int, SparseAutoEncoder]] = None) -> torch.nn.Module:
     if (params := next(module.parameters(), None)) is None:
         return module
 

@@ -106,6 +106,26 @@ class ModelConfig:
 
     Note that the model may support other tasks using the same model runner.
     """
+    # sae fields
+    sae_name: Optional[str] = None
+    "name of the sae in huggingface"
+    sae_filepath: Optional[str] = None
+    "path to the sae file in huggingface repo"
+    hidden_size: Optional[int] = None
+    "hidden size of the sae, usually the same as the hidden size of the model"
+    sae_expansion_factor: Optional[int] = None
+    "expansion factor of the sae, hidden_size * expansion_factor = num_sae_features"
+    steering_layer: Optional[int] = None
+    "steering layer of the sae in the llm"
+    feature_layer: Optional[int] = None
+    "feature layer of the sae in the llm to get feature readouts"
+    steering_scale_factor: float = 1.3
+    "scale factor for subtracting steering tensor from hidden states before final norm"
+    # extra sae fields for gemma
+    sae_release: Optional[str] = None
+    "release of the sae in sae_lens"
+    sae_id: Optional[str] = None
+    "id of the sae in sae_lens"
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""

@@ -25,6 +25,8 @@ import torch
 from torch import nn
 from transformers import GemmaConfig
 
+from vllm.inputs import InterventionInputs
+
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -403,6 +405,9 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        interventions: Optional[list[InterventionInputs]] = None,
+        steer_positions: Optional[list[int]] = None,
+        feature_enabled: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)

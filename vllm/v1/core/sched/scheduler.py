@@ -8,8 +8,10 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
-
+from vllm.inputs import InterventionInputs
 from vllm.config import VllmConfig
+import numpy as np
+
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
@@ -192,6 +194,11 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        # get the list of activations layers to pull for each request
+        get_activations_layer_list: list[list[int]] = []
+        # get the interventions and is_feature_decode for each request
+        intervention_list: list[InterventionInputs] = []
+        is_feature_decode_list: list[bool] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -209,7 +216,10 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-
+            # append the interventions and is_feature_decode for each request
+            intervention_list.append(request.interventions)
+            is_feature_decode_list.append(request.is_feature_decode)
+            get_activations_layer_list.append(request.get_activations_layer)
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
@@ -298,6 +308,7 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs.append(request)
             req_to_new_blocks[request.request_id] = new_blocks
             num_scheduled_tokens[request.request_id] = num_new_tokens
+
             token_budget -= num_new_tokens
             req_index += 1
 
@@ -340,7 +351,11 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting.peek_request()
-
+                # append the interventions and is_feature_decode for each request
+                intervention_list.append(request.interventions)
+                is_feature_decode_list.append(request.is_feature_decode)
+                # append the activations layers to pull for each request
+                get_activations_layer_list.append(request.get_activations_layer)
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                     is_ready = self._update_waiting_for_remote_kv(request)
@@ -598,6 +613,11 @@ class Scheduler(SchedulerInterface):
             get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            # append the interventions and is_feature_decode for each request to create scheduler object
+            intervention_list=intervention_list,
+            is_feature_decode_list=is_feature_decode_list,
+            # append the activations layers to pull for each request to create scheduler object
+            get_activations_layer_list=get_activations_layer_list,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -884,8 +904,29 @@ class Scheduler(SchedulerInterface):
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            # for the request ids, get steer positions and is feature decode
+            steer_positions = model_runner_output.steer_positions_dict[req_id]
+            is_feature_decode = model_runner_output.is_feature_decode_id_to_index[req_id]
+            if model_runner_output.feature_tensor is not None:
+                # get feature tensor for the request id if feature tensor is not None
+                feature_tensor = model_runner_output.feature_tensor[steer_positions[0]:steer_positions[1]]
+            else:
+                # feature tensor is not returned for regular vllm setup
+                feature_tensor = None
+            if model_runner_output.activations_tensor is not None:
+                # get activations tensor for the request id if activations tensor is not None
+                activations_output = {
+                    idx: model_runner_output.activations_tensor[idx][steer_positions[0]:steer_positions[1]]
+                    for idx in model_runner_output.activations_tensor.keys()
+                    if idx in model_runner_output.get_activations_layer_id_to_index[req_id]
+                }
+            else:
+                # activations tensor is not returned for regular vllm setup
+                activations_output = {}
+
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
+
             if request is None:
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
@@ -919,10 +960,20 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # Stop immediately after decoding for feature decode requests.
+            if is_feature_decode:
+                stopped = True
+                new_token_ids = []
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids)
+            # for feature decode requests, stop immediately after decoding
+            if is_feature_decode:
+                request.stop_reason = "feature_decode"
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
 
             # Stop checking for pooler models.
             pooler_output = None
@@ -958,8 +1009,10 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            # if feature decode, set the stop reason to feature decode and stop immediately and return output
+            # is_feature_decode condition is added here in addition to the regular vllm stop reason checks
             if new_token_ids or pooler_output is not None \
-                or kv_transfer_params:
+                or kv_transfer_params or is_feature_decode:
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -975,6 +1028,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        feature_tensor=feature_tensor.cpu() if feature_tensor is not None else None,
+                        activations_output=activations_output,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.

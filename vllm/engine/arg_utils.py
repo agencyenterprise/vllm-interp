@@ -289,6 +289,20 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
+    # sae fields for engine args, they are optional, but required for steering and feature readouts.
+    sae_name: Optional[str] = ModelConfig.sae_name
+    sae_filepath: Optional[str] = ModelConfig.sae_filepath
+    hidden_size: Optional[int] = ModelConfig.hidden_size
+    sae_expansion_factor: Optional[int] = ModelConfig.sae_expansion_factor
+    steering_layer: Optional[int] = ModelConfig.steering_layer
+    feature_layer: Optional[int] = ModelConfig.feature_layer
+    steering_scale_factor: float = ModelConfig.steering_scale_factor
+
+    # extra args for gemma SAE
+    sae_release: Optional[str] = ModelConfig.sae_release
+    sae_id: Optional[str] = ModelConfig.sae_id
+
+
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
     task: Optional[TaskOption] = ModelConfig.task
@@ -994,6 +1008,15 @@ class EngineArgs:
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            sae_name=self.sae_name,
+            sae_filepath=self.sae_filepath,
+            hidden_size=self.hidden_size,
+            sae_expansion_factor=self.sae_expansion_factor,
+            steering_layer=self.steering_layer,
+            feature_layer=self.feature_layer,
+            steering_scale_factor=self.steering_scale_factor,
+            sae_id=self.sae_id,
+            sae_release=self.sae_release,
             runner=self.runner,
             convert=self.convert,
             task=self.task,
