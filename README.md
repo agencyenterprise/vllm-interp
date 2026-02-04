@@ -1,97 +1,112 @@
-# Installation guide for VLLM-SAE
+# vllm-interp
 
-Prereqs: Environment with CUDA 12.8 as VLLM is compiled with CUDA 12.8. 
+A fork of [vLLM](https://github.com/vllm-project/vllm) with support for SAE (Sparse Autoencoder) steering and activation extraction.
 
-- Prepare the environment for insallation, install gcc, and other build packages.
+**Base vLLM commit:** [`a2e6fa7e`](https://github.com/vllm-project/vllm/commit/a2e6fa7e035ff058fc37fdaaf014707efff2fcf3)
 
-`apt-get update -y`
+## What's Added (vllm-interp)
 
-`apt-get install python3.12 python3.12-venv -y`
+The following files and modifications are specific to vllm-interp and not part of the original vLLM:
 
-`apt-get install python3-dev build-essential -y`
+### New Files
+- `vllm/model_executor/models/goodfire_sae.py` - Goodfire SAE setup and loading
+- `vllm/model_executor/models/llama_models_and_saes.py` - SAE configuration for different Llama models
+- `example_scripts/async_example_llama.py` - Example script for running Llama with SAE steering
+- `local_reqs/requirements.txt` - Additional requirements for SAE functionality
 
-`apt-get install ninja-build cmake jq zip -y`
+### Modified Files
+- `vllm/model_executor/models/llama.py` - Extended with SAE steering support (see details below)
+- `vllm/v1/worker/gpu_model_runner.py` - Added `steer_positions` generation for steering
 
-`apt-get install -y python3.12-dev build-essential ninja-build`
+### Key Modifications to `llama.py`
 
-`apt install -y build-essential`
+The main additions to the Llama model are:
 
-`apt install -y libstdc++-12-dev libc6-dev`
+1. **`init_sae_for_rank`**: Initializes and loads the SAE for each worker
+2. **`forward_sae`**: Runs the intervention/steering using the SAE
 
-`apt install -y gcc g++ gcc-multilib g++-multilib`
+The `forward` method is extended with two additional arguments:
+- `interventions`: A list of intervention inputs with featureID and strength
+- `steer_positions`: Generated in `gpu_model_runner.py` (not required when sending requests to the engine)
 
-Then, activate the virtualenv, for example via:
+Key code locations:
+- Forward signature extension: `vllm/model_executor/models/llama.py:L722`
+- Output modification: `vllm/model_executor/models/llama.py:L509`
+- Sparse output handling: `vllm/model_executor/models/llama.py:L356` and `L367`
+- Final layer tensor subtraction: `vllm/model_executor/models/llama.py:L536`
 
-`python3.12 -m venv /tmp/vllm_env`
+The `intervention_enabled` flag determines the steering layer, while `feature_enabled` determines the layer for reading features. Goodfire SAEs have different steering and feature layers (see `llama_models_and_saes.py`).
 
-`source /tmp/vllm_env/bin/activate`
+---
 
-We need to install `sae_lens` separately first, as it uses an outdated `numpy` version. For example, via,
+## Installation
 
-`pip install sae_lens==6.13.0`
+Prerequisites: Environment with CUDA 12.8 (vLLM is compiled with CUDA 12.8).
 
-Then, install specific build packages:
+### 1. Prepare the environment
 
-`pip install pip wheel setuptools_scm setuptools --upgrade`
+```bash
+apt-get update -y
+apt-get install python3.12 python3.12-venv -y
+apt-get install python3-dev build-essential -y
+apt-get install ninja-build cmake jq zip -y
+apt-get install -y python3.12-dev build-essential ninja-build
+apt install -y build-essential
+apt install -y libstdc++-12-dev libc6-dev
+apt install -y gcc g++ gcc-multilib g++-multilib
+```
 
-Install the requirements here https://github.com/agencyenterprise/vllm-sae/blob/main/local_reqs/requirements.txt:
+### 2. Create and activate virtualenv
 
-`pip install -r local_reqs/requirements.txt`.
+```bash
+python3.12 -m venv /tmp/vllm_env
+source /tmp/vllm_env/bin/activate
+```
 
-Finally, install the vllm as an editable package with pre-built libraries:
+### 3. Install sae_lens first (uses outdated numpy version)
 
-`export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/a2e6fa7e035ff058fc37fdaaf014707efff2fcf3/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl`
+```bash
+pip install sae_lens==6.13.0
+```
 
-`pip install --editable .`
+### 4. Install build packages
 
-The URL from is the pre-built commit that is origin of the vllm-sae fork.
+```bash
+pip install pip wheel setuptools_scm setuptools --upgrade
+```
 
-# Main files:
-The main files for running Llama or Gemma2 SAEs are as follows:
+### 5. Install requirements
 
-Llama:
+```bash
+pip install -r local_reqs/requirements.txt
+```
 
-- https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py
-- https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/goodfire_sae.py
-- https://github.com/agencyenterprise/vllm-sae/blob/main/example_scripts/async_example_llama.py
+### 6. Install vllm-interp as editable package with pre-built libraries
 
-The first file is the modified llama function, the second one is for the Goodfire SAE setup. The third one is an example file to launch the vLLM engine with llama model and send requests.
+```bash
+export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/a2e6fa7e035ff058fc37fdaaf014707efff2fcf3/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+pip install --editable .
+```
 
-The main differences in the llama module is having the following additional functions:
+The wheel URL corresponds to the base vLLM commit that vllm-interp is forked from.
 
-`init_sae_for_rank`: Initializes and loads the SAE for each worker.
-'forward_sae`: Runs the intervention/steering using the SAE.
+---
 
-https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py#L722
+## Usage
 
-In this line, we extend the `forward` method of the LLM models with two additional arguments:
+### Environment Variables
 
-- `interventions`: A list of intervention inputs with featureID and strength.
-- `steer_positions`: This input is generated here: https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/v1/worker/gpu_model_runner.py#L976, which gives the sequences lengths of applying steering as VLLM does not have an explicit batch dimension. This input is not required for sending requests to the engine.
+Required for attention backend (especially for Gemma models):
+```bash
+export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_FLASH_ATTN_VERSION=3
+```
 
-To modify the output, you can read the following part: https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py#L509
+Set your Hugging Face token to pull Llama models:
+```bash
+export HF_TOKEN=your_token_here
+```
 
-Specifically, there are two main checks: `intervention_enabled` and `feature_enabled`. The first one is to determine the steering layer, the second one is the layer for reading features. For example, Goodfire SAEs have different steering and feature layers, see https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama_models_and_saes.py for details.
+### Example Script
 
-If steering is enabled, we send the hidden states to the `forward_sae` function and apply steering. There are 2 main things that are different compared to the vllm llama setup:
-
-- The forward method of llama is slightly modified to get "sparse" outputs from SAE as it's trained with a different forward method.
-The main differences can be found here:
-- https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py#L356
-- https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py#L367
-
-Second, we "subtract" the added tensor at the final layer here before returning the final hidden states:
-
-- https://github.com/agencyenterprise/vllm-sae/blob/main/vllm/model_executor/models/llama.py#L536
-This generally helps with more stable steering, not yet tested extensively with Gemma2 SAEs.
-
-Finally, see the script for an exmaple with batched steering inputs and printing outputs: https://github.com/agencyenterprise/vllm-sae/blob/main/example_scripts/async_example_llama.py
-
-To run the script, you need 3 env variables:
-First two are related to the attention backend, and is required for Gemma models:
-
-- `VLLM_ATTENTION_BACKEND=FLASHINFER`
-- `VLLM_FLASH_ATTN_VERSION=3`
-
-Finally, set `HF_TOKEN` to pull the llama model.
-
+See `example_scripts/async_example_llama.py` for a complete example with batched steering inputs.

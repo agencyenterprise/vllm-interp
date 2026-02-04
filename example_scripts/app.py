@@ -52,7 +52,7 @@ class GenerateResponse(BaseModel):
     request_time_s: float
 
 
-app = FastAPI(title="vLLM-SAE Server")
+app = FastAPI(title="vllm-interp Server")
 
 
 # Global engine/tokenizer initialized at startup
