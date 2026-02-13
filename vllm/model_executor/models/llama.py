@@ -38,7 +38,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import InterventionInputs
-from vllm.model_executor.models.goodfire_sae import SparseAutoEncoder, load_sae
+from vllm.model_executor.interp import InterpCodec, apply_steering, init_codec_for_rank
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -58,26 +58,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-
-# init the sae for each rank for multi-gpu setup
-def init_sae_for_rank(sae_name: str, sae_filepath: str, hidden_size: int, sae_expansion_factor: int) -> dict[int, SparseAutoEncoder]:
-    # get the local rank of the tp group for multi-gpu setup
-    tp_rank = get_tp_group().local_rank
-    # cached_saes is a dictionary to store the sae for each rank
-    cached_saes: dict[int, SparseAutoEncoder] = {}
-    # if the sae for the current rank is not in the cached_saes, load the sae
-    if tp_rank not in cached_saes:
-        # get the device for the current rank
-        device = f"cuda:{tp_rank}"  # Use the GPU corresponding to TP rank
-        device = torch.device(device)
-        cached_saes[tp_rank]: SparseAutoEncoder = load_sae(sae_name, sae_filepath, hidden_size, sae_expansion_factor, device)
-        new_dict: dict[str, torch.Tensor] = {}
-        # load the state dict of the sae for the current rank
-        for key, item in cached_saes[tp_rank].state_dict().items():
-            new_dict[key.replace("module._orig_mod.", "")] = item
-        cached_saes[tp_rank].load_state_dict(new_dict)
-
-    return cached_saes
 
 
 class LlamaMLP(nn.Module):
@@ -266,17 +246,14 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(self,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 # get the config and cached_saes from the vllm_config
                  config: Optional[LlamaConfig] = None,
-                 cached_saes: Optional[dict[int, SparseAutoEncoder]] = None) -> None:
+                 cached_codecs: Optional[dict[int, InterpCodec]] = None) -> None:
         super().__init__()
 
         config = config or vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
-        # get the cached_saes from the vllm_config
-        self.cached_saes = cached_saes
-        # get the local rank of the tp group for multi-gpu setup
+        self.cached_codecs = cached_codecs
         self.tp_rank = get_tp_group().local_rank
 
         self.hidden_size = config.hidden_size
@@ -365,56 +342,27 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         # need to add this residual for goodfire SAE, this is different from original llama.py
         hidden_states = residual + hidden_states
-        # run intervention if enabled in the layer and if the sae is initialized
-        if intervention_enabled and self.cached_saes is not None:
-            hidden_states, add_tensor = self.forward_sae(hidden_states, intervention_list, steer_positions)
+        # run intervention if enabled in the layer and if the codec is initialized
+        if intervention_enabled and self.cached_codecs is not None:
+            result = apply_steering(
+                self.cached_codecs[self.tp_rank], hidden_states,
+                intervention_list, steer_positions,
+            )
+            hidden_states = result.hidden_states
+            add_tensor = result.add_tensor_projected
         else:
             add_tensor = None
-        # get the feature readout if enabled in the layer and if the sae is initialized
-        if feature_enabled and self.cached_saes is not None:
-            features = self.cached_saes[self.tp_rank].encode(hidden_states)
+        # get the feature readout if enabled in the layer and if the codec is initialized
+        if feature_enabled and self.cached_codecs is not None:
+            features = self.cached_codecs[self.tp_rank].encode(hidden_states)
         else:
             features = None
-        # add_tensor = None
         return hidden_states, residual, add_tensor, features
 
     def get_quant_config(
             self, vllm_config: VllmConfig) -> Optional[QuantizationConfig]:
         """Get quantization config for this layer. Override in subclasses."""
         return vllm_config.quant_config
-
-    def forward_sae(self, hidden_states: torch.Tensor, intervention_list: list[InterventionInputs], steer_positions: list[int]) -> torch.Tensor:
-        # get the sae for the current rank
-        sae = self.cached_saes[self.tp_rank]
-        # get the feature encoding
-        features = sae.encode(hidden_states)
-        # Initialize the add tensor for the intervention
-        add_tensor = torch.zeros_like(
-            features, dtype=torch.bfloat16, device=features.device)
-        # get the reconstructed acts
-        reconstructed_acts = sae.decode(features)
-        # get the error between the hidden states and the reconstructed acts
-        error = hidden_states - reconstructed_acts
-        # print("intervention_list", intervention_list)
-        for i, (intervention) in enumerate(intervention_list):
-            # if the intervention is not enabled, skip
-            if not intervention:
-                continue
-            # get the position range for the intervention, vllm has no batch dimension, so we need to get the position range for the intervention
-            pos_beg, pos_end = steer_positions[i], steer_positions[i+1]
-            # print("pos_beg", pos_beg, "pos_end", pos_end)
-            for steer in intervention["intervention"]:
-                # check the intervention mode (default to "add" for backwards compatibility)
-                mode = steer.get("mode", "add")
-                if mode == "clamp":
-                    # clamp the feature to the specified value
-                    features[pos_beg:pos_end, steer["feature_id"]] = steer["value"]
-                else:  # mode == "add"
-                    # add the value to the add tensor
-                    add_tensor[pos_beg:pos_end, steer["feature_id"]] += steer["value"]
-        features += add_tensor
-        # return the reconstructed acts and the add tensor for more stable intervention later
-        return sae.decode(features) + error, torch.matmul(add_tensor, sae.decoder_linear.weight.T)
 
 
 @support_torch_compile
@@ -430,18 +378,23 @@ class LlamaModel(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        # sae fields to load the sae
-        self.sae_name = vllm_config.model_config.sae_name
-        self.sae_filepath = vllm_config.model_config.sae_filepath
-        self.hidden_size = vllm_config.model_config.hidden_size
-        self.sae_expansion_factor = vllm_config.model_config.sae_expansion_factor
         self.steering_layer = vllm_config.model_config.steering_layer
         self.feature_layer = vllm_config.model_config.feature_layer
-        # init the sae for each rank for multi-gpu setup
-        if self.sae_name is not None:
-            self.cached_saes = init_sae_for_rank(self.sae_name, self.sae_filepath, self.hidden_size, self.sae_expansion_factor)
+        # init the codec for each rank for multi-gpu setup
+        codec_type = vllm_config.model_config.codec_type
+        if codec_type is not None:
+            self.cached_codecs = init_codec_for_rank(
+                codec_type,
+                sae_name=vllm_config.model_config.sae_name,
+                sae_filepath=vllm_config.model_config.sae_filepath,
+                hidden_size=vllm_config.model_config.hidden_size,
+                sae_expansion_factor=vllm_config.model_config.sae_expansion_factor,
+                sae_release=vllm_config.model_config.sae_release,
+                sae_id=vllm_config.model_config.sae_id,
+                directions_filepath=vllm_config.model_config.directions_filepath,
+            )
         else:
-            self.cached_saes = None
+            self.cached_codecs = None
         # this is the scale factor to subtract the steered tensor from the hidden states
         self.scale_factor_add_tensor = vllm_config.model_config.steering_scale_factor
         # this is the add tensor for the intervention
@@ -466,10 +419,9 @@ class LlamaModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
-        # create the layers for the model with cached_saes
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix, cached_saes=self.cached_saes),
+            lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix, cached_codecs=self.cached_codecs),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:

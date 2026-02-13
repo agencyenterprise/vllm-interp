@@ -302,6 +302,10 @@ class EngineArgs:
     sae_release: Optional[str] = ModelConfig.sae_release
     sae_id: Optional[str] = ModelConfig.sae_id
 
+    # generic codec args
+    codec_type: Optional[str] = ModelConfig.codec_type
+    directions_filepath: Optional[str] = ModelConfig.directions_filepath
+
 
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
@@ -1017,6 +1021,8 @@ class EngineArgs:
             steering_scale_factor=self.steering_scale_factor,
             sae_id=self.sae_id,
             sae_release=self.sae_release,
+            codec_type=self.codec_type,
+            directions_filepath=self.directions_filepath,
             runner=self.runner,
             convert=self.convert,
             task=self.task,

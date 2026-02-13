@@ -126,6 +126,11 @@ class ModelConfig:
     "release of the sae in sae_lens"
     sae_id: Optional[str] = None
     "id of the sae in sae_lens"
+    # generic codec fields
+    codec_type: Optional[str] = None
+    "codec type: 'goodfire_sae', 'sae_lens', or 'direction_set'"
+    directions_filepath: Optional[str] = None
+    "path to directions file (.pt or .npy) for direction_set codec"
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
@@ -393,6 +398,12 @@ class ModelConfig:
                     "VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may "
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
+
+        # Infer codec_type from legacy SAE fields for backward compat
+        if self.codec_type is None and self.sae_name is not None:
+            self.codec_type = "goodfire_sae"
+        if self.codec_type is None and self.sae_release is not None and self.sae_id is not None:
+            self.codec_type = "sae_lens"
 
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
