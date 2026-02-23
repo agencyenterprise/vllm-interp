@@ -76,7 +76,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "12.8"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
-    VLLM_USE_PRECOMPILED: bool = False
+    VLLM_USE_PRECOMPILED: bool = True
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -387,10 +387,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "NVCC_THREADS":
     lambda: os.getenv("NVCC_THREADS", None),
 
-    # If set, vllm will use precompiled binaries (*.so)
+    # Use precompiled binaries by default; set to "0" or "false" to disable
     "VLLM_USE_PRECOMPILED":
-    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
-    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "1").strip().lower() not in
+    ("0", "false"),
 
     # Used to mark that setup.py is running in a Docker build context,
     # in order to force the use of precompiled binaries.
