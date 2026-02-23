@@ -621,7 +621,9 @@ if envs.VLLM_USE_PRECOMPILED:
             wheel_tag = "manylinux2014_aarch64"
         else:
             raise ValueError(f"Unsupported architecture: {arch}")
-        base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        # Hardcoded to the upstream vLLM commit this fork is based on.
+        # get_base_commit_in_main_branch() does not work for forks.
+        base_commit = "a2e6fa7e035ff058fc37fdaaf014707efff2fcf3"
         wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         from urllib.request import urlopen
