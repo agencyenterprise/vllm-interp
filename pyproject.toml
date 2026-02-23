@@ -32,7 +32,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.10,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -325,5 +325,14 @@ windo = "windo"
 
 [tool.typos.type.vimscript.extend-words]
 
+[dependency-groups]
+interp = [
+    "sae-lens>=6.37.0",
+]
+
 [tool.uv]
 no-build-isolation-package = ["torch"]
+default-groups = ["interp"]
+override-dependencies = [
+    "transformers>=4.55.2,<5",
+]
