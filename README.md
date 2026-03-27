@@ -41,51 +41,51 @@ The `intervention_enabled` flag determines the steering layer, while `feature_en
 
 ## Installation
 
-Prerequisites: Environment with CUDA 12.8 (vLLM is compiled with CUDA 12.8).
+Prerequisites: Environment with CUDA 12.8+ driver (vLLM is compiled with CUDA 12.8).
 
 ### 1. Prepare the environment
 
 ```bash
 apt-get update -y
-apt-get install python3.12 python3.12-venv -y
-apt-get install python3-dev build-essential -y
 apt-get install ninja-build cmake jq zip -y
-apt-get install -y python3.12-dev build-essential ninja-build
-apt install -y build-essential
-apt install -y libstdc++-12-dev libc6-dev
-apt install -y gcc g++ gcc-multilib g++-multilib
+apt-get install -y build-essential libstdc++-12-dev libc6-dev
+apt-get install -y gcc g++ gcc-multilib g++-multilib
 ```
 
-### 2. Create and activate virtualenv
+### 2. Install uv and create virtualenv
+
+[uv](https://docs.astral.sh/uv/) handles Python version management — no need to install Python 3.12 separately.
 
 ```bash
-python3.12 -m venv /tmp/vllm_env
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env  # or restart shell
+uv venv /tmp/vllm_env --python 3.12
 source /tmp/vllm_env/bin/activate
 ```
 
 ### 3. Install sae_lens first (uses outdated numpy version)
 
 ```bash
-pip install sae_lens==6.13.0
+uv pip install sae_lens==6.13.0
 ```
 
 ### 4. Install build packages
 
 ```bash
-pip install pip wheel setuptools_scm setuptools --upgrade
+uv pip install pip wheel setuptools_scm setuptools --upgrade
 ```
 
 ### 5. Install requirements
 
 ```bash
-pip install -r local_reqs/requirements.txt
+uv pip install -r local_reqs/requirements.txt
 ```
 
 ### 6. Install vllm-interp as editable package with pre-built libraries
 
 ```bash
 export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/a2e6fa7e035ff058fc37fdaaf014707efff2fcf3/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-pip install --editable .
+uv pip install --editable .
 ```
 
 The wheel URL corresponds to the base vLLM commit that vllm-interp is forked from.

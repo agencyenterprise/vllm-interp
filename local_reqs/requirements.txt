@@ -117,7 +117,7 @@ plotly==6.3.1
 plotly-express==0.4.1
 prometheus-fastapi-instrumentator==7.1.0
 prometheus_client==0.23.1
-propcache==0.4.0
+propcache==0.4.1
 protobuf==6.32.1
 psutil==7.1.0
 py-cpuinfo==9.0.0
@@ -173,7 +173,7 @@ torchaudio==2.8.0
 torchvision==0.23.0
 tqdm==4.67.1
 # transformer-lens==2.16.1
-transformers==4.57.0
+transformers==4.57.1
 transformers-stream-generator==0.0.5
 triton==3.4.0
 typeguard==4.4.4
