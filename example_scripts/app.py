@@ -28,8 +28,9 @@ class ChatMessage(BaseModel):
 
 
 class InterventionSpec(BaseModel):
-    """One SAE feature intervention with steering value."""
-    feature_id: int
+    """One steering intervention: either an SAE feature_id or a pre-computed vector_id."""
+    feature_id: Optional[int] = None
+    vector_id: Optional[int] = None
     value: float
     mode: Optional[str] = "add"  # "add" or "clamp"
 
@@ -135,10 +136,16 @@ async def generate(req: GenerateRequest):
     token_inputs = TokenInputs(prompt_token_ids=prompt_token_ids, prompt=messages)
 
     if req.intervention is not None:
-        # Package SAE feature interventions expected by the engine
-        interventions = InterventionInputs(
-            intervention=[{"feature_id": iv.feature_id, "value": iv.value, "mode": iv.mode} for iv in req.intervention]
-        )
+        # Package interventions (SAE features and/or pre-computed vectors)
+        intervention_list = []
+        for iv in req.intervention:
+            entry: dict = {"value": iv.value, "mode": iv.mode}
+            if iv.vector_id is not None:
+                entry["vector_id"] = iv.vector_id
+            if iv.feature_id is not None:
+                entry["feature_id"] = iv.feature_id
+            intervention_list.append(entry)
+        interventions = InterventionInputs(intervention=intervention_list)
     else:
         interventions = None
 

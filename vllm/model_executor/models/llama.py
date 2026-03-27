@@ -404,6 +404,9 @@ class LlamaDecoderLayer(nn.Module):
             pos_beg, pos_end = steer_positions[i], steer_positions[i+1]
             # print("pos_beg", pos_beg, "pos_end", pos_end)
             for steer in intervention["intervention"]:
+                # skip vector interventions — handled in LlamaModel.forward
+                if "feature_id" not in steer:
+                    continue
                 # check the intervention mode (default to "add" for backwards compatibility)
                 mode = steer.get("mode", "add")
                 if mode == "clamp":
@@ -442,6 +445,20 @@ class LlamaModel(nn.Module):
             self.cached_saes = init_sae_for_rank(self.sae_name, self.sae_filepath, self.hidden_size, self.sae_expansion_factor)
         else:
             self.cached_saes = None
+        # load pre-computed steering vectors if provided
+        steering_vectors_path = vllm_config.model_config.steering_vectors_path
+        if steering_vectors_path is not None:
+            tp_rank = get_tp_group().local_rank
+            device = torch.device(f"cuda:{tp_rank}")
+            raw = torch.load(steering_vectors_path, map_location=device, weights_only=True)
+            # Support both raw tensors and contrastive dataset dicts
+            if isinstance(raw, dict) and "vectors" in raw:
+                self.steering_vectors = raw["vectors"].to(dtype=torch.bfloat16, device=device)
+            else:
+                self.steering_vectors = raw.to(dtype=torch.bfloat16, device=device)
+            print(f"Loaded {self.steering_vectors.shape[0]} steering vectors from {steering_vectors_path}")
+        else:
+            self.steering_vectors = None
         # this is the scale factor to subtract the steered tensor from the hidden states
         self.scale_factor_add_tensor = vllm_config.model_config.steering_scale_factor
         # this is the add tensor for the intervention
@@ -535,6 +552,17 @@ class LlamaModel(nn.Module):
             # if steering layer, get the add tensor
             if add_tensor is not None:
                 self.add_tensor = add_tensor
+            # if steering layer, apply pre-computed vector interventions directly
+            if idx == self.steering_layer and self.steering_vectors is not None and interventions is not None and steer_positions is not None:
+                for i, intervention in enumerate(interventions):
+                    if not intervention:
+                        continue
+                    pos_beg, pos_end = steer_positions[i], steer_positions[i + 1]
+                    for steer in intervention["intervention"]:
+                        if "vector_id" not in steer:
+                            continue
+                        vec = self.steering_vectors[steer["vector_id"]]
+                        hidden_states[pos_beg:pos_end] += vec * steer["value"]
             # if feature layer, get the feature tensor
             if feature_tensor is not None:
                 self.feature_tensor = feature_tensor

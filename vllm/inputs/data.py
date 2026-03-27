@@ -198,11 +198,14 @@ both decoder-only and encoder/decoder input types:
 class InterventionInput(TypedDict):
     """Represents intervention inputs."""
 
-    feature_id: int
-    """The feature ID to be intervened on."""
+    feature_id: NotRequired[int]
+    """The SAE feature ID to be intervened on. Mutually exclusive with vector_id."""
+
+    vector_id: NotRequired[int]
+    """Index into pre-loaded steering vectors. Mutually exclusive with feature_id."""
 
     value: float
-    """The value for the intervention (added or clamped depending on mode)."""
+    """The value for the intervention (scale factor for vectors, added or clamped for SAE features)."""
 
     mode: NotRequired[Literal["add", "clamp"]]
     """The intervention mode: 'add' (default) adds the value, 'clamp' sets the feature to the value."""

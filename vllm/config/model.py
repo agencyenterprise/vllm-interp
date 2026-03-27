@@ -121,6 +121,8 @@ class ModelConfig:
     "feature layer of the sae in the llm to get feature readouts"
     steering_scale_factor: float = 1.3
     "scale factor for subtracting steering tensor from hidden states before final norm"
+    steering_vectors_path: Optional[str] = None
+    "path to a .pt file containing pre-computed steering vectors (shape [N, hidden_dim])"
     # extra sae fields for gemma
     sae_release: Optional[str] = None
     "release of the sae in sae_lens"

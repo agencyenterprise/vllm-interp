@@ -297,6 +297,7 @@ class EngineArgs:
     steering_layer: Optional[int] = ModelConfig.steering_layer
     feature_layer: Optional[int] = ModelConfig.feature_layer
     steering_scale_factor: float = ModelConfig.steering_scale_factor
+    steering_vectors_path: Optional[str] = ModelConfig.steering_vectors_path
 
     # extra args for gemma SAE
     sae_release: Optional[str] = ModelConfig.sae_release
@@ -1015,6 +1016,7 @@ class EngineArgs:
             steering_layer=self.steering_layer,
             feature_layer=self.feature_layer,
             steering_scale_factor=self.steering_scale_factor,
+            steering_vectors_path=self.steering_vectors_path,
             sae_id=self.sae_id,
             sae_release=self.sae_release,
             runner=self.runner,
