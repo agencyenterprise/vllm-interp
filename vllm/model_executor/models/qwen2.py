@@ -36,7 +36,9 @@ from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size,
+                               get_tp_group)
+from vllm.inputs import InterventionInputs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -263,7 +265,7 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return hidden_states, residual, None, None
 
 
 @support_torch_compile(
@@ -302,6 +304,29 @@ class Qwen2Model(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
+
+        # Steering configuration
+        self.steering_layer = vllm_config.model_config.steering_layer
+        self.feature_layer = vllm_config.model_config.feature_layer
+        self.scale_factor_add_tensor = vllm_config.model_config.steering_scale_factor
+
+        # Load pre-computed steering vectors if provided
+        steering_vectors_path = vllm_config.model_config.steering_vectors_path
+        if steering_vectors_path is not None:
+            tp_rank = get_tp_group().local_rank
+            device = torch.device(f"cuda:{tp_rank}")
+            raw = torch.load(steering_vectors_path, map_location=device, weights_only=True)
+            if isinstance(raw, dict) and "vectors" in raw:
+                self.steering_vectors = raw["vectors"].to(dtype=torch.bfloat16, device=device)
+            else:
+                self.steering_vectors = raw.to(dtype=torch.bfloat16, device=device)
+            print(f"Loaded {self.steering_vectors.shape[0]} steering vectors from {steering_vectors_path}")
+        else:
+            self.steering_vectors = None
+
+        self.add_tensor = None
+        self.feature_tensor = None
+        self.activations_tensor: dict[int, torch.Tensor] = {}
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
@@ -344,6 +369,9 @@ class Qwen2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        interventions: Optional[list[InterventionInputs]] = None,
+        steer_positions: Optional[list[int]] = None,
+        get_activations_layer: Optional[set[int]] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -356,12 +384,31 @@ class Qwen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        self.activations_tensor = {}
         aux_hidden_states = []
         for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual, add_tensor, feature_tensor = layer(
+                positions, hidden_states, residual)
+            if add_tensor is not None:
+                self.add_tensor = add_tensor
+            # Apply pre-computed vector interventions at the steering layer
+            if idx == self.steering_layer and self.steering_vectors is not None and interventions is not None and steer_positions is not None:
+                for i, intervention in enumerate(interventions):
+                    if not intervention:
+                        continue
+                    pos_beg, pos_end = steer_positions[i], steer_positions[i + 1]
+                    for steer in intervention["intervention"]:
+                        if "vector_id" not in steer:
+                            continue
+                        vec = self.steering_vectors[steer["vector_id"]]
+                        hidden_states[pos_beg:pos_end] += vec * steer["value"]
+            if feature_tensor is not None:
+                self.feature_tensor = feature_tensor
+            if get_activations_layer and idx in get_activations_layer:
+                self.activations_tensor[idx] = hidden_states.detach().cpu()
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -369,12 +416,14 @@ class Qwen2Model(nn.Module):
                 "residual": residual
             })
 
+        if self.add_tensor is not None:
+            hidden_states -= self.add_tensor * self.scale_factor_add_tensor
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
-            return hidden_states, aux_hidden_states
+            return hidden_states, aux_hidden_states, self.feature_tensor, self.activations_tensor
 
-        return hidden_states
+        return hidden_states, self.feature_tensor, self.activations_tensor
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -501,9 +550,13 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        interventions: Optional[list[InterventionInputs]] = None,
+        steer_positions: Optional[list[int]] = None,
+        get_activations_layer: Optional[set[int]] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, interventions,
+                                   steer_positions, get_activations_layer)
         return hidden_states
 
     def compute_logits(
