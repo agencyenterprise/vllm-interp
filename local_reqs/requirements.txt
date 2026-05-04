@@ -111,7 +111,7 @@ packaging==25.0
 pandas==2.3.3
 partial-json-parser==0.2.1.1.post6
 patsy==1.0.1
-pillow==11.3.0
+pillow==12.2.0
 platformdirs==4.4.0
 plotly==6.3.1
 plotly-express==0.4.1
